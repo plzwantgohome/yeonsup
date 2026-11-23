@@ -2,196 +2,192 @@
 import json
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 
 import streamlit as st
 
-# 이 폴더에 테스트용 저장 파일을 만듭니다.
+# 저장 파일이 들어갈 위치
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
-JSON_PATH = DATA_DIR / "saves.json"
-DB_PATH = DATA_DIR / "saves.db"
 
-PLACES = ["교무실", "학생회실", "인쇄실", "최종 추리"]
-MODES = ["Session State", "JSON 파일", "SQLite 데이터베이스"]
+JSON_FILE = DATA_DIR / "saves.json"
+SQLITE_FILE = DATA_DIR / "saves.db"
+
+PLACES = [
+    "교무실",
+    "학생회실",
+    "방송실",
+    "공용 인쇄실",
+    "최종 추리"
+]
+
+MODES = ["SQLite", "JSON", "Session State"]
 
 
-def new_progress():
+# 처음 시작할 때의 게임 상태
+def empty_progress():
     return {"place": 0, "clues": [], "memo": ""}
 
 
-def save_json(slot, progress):
-    if JSON_PATH.exists():
-        records = json.loads(JSON_PATH.read_text(encoding="utf-8"))
-    else:
-        records = {}
+# 저장된 데이터 불러오기
+def read_saved(mode, save_id):
+    if mode == "JSON":
+        if not JSON_FILE.exists():
+            return None
 
-    records[slot] = progress
-
-    JSON_PATH.write_text(
-        json.dumps(records, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
-
-
-def load_json(slot):
-    if not JSON_PATH.exists():
-        return None
-
-    records = json.loads(JSON_PATH.read_text(encoding="utf-8"))
-    return records.get(slot)
-
-
-def save_sqlite(slot, progress):
-    with sqlite3.connect(DB_PATH) as connection:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS saves "
-            "(slot TEXT PRIMARY KEY, progress_json TEXT NOT NULL)"
+        data = json.loads(
+            JSON_FILE.read_text(encoding="utf-8")
         )
-        connection.execute(
-            "INSERT OR REPLACE INTO saves(slot, progress_json) VALUES (?, ?)",
-            (slot, json.dumps(progress, ensure_ascii=False)),
-        )
-        connection.commit()
+        return data.get(save_id)
 
+    if mode == "SQLite":
+        with sqlite3.connect(SQLITE_FILE) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS saves "
+                "(save_id TEXT PRIMARY KEY, state TEXT NOT NULL)"
+            )
 
-def load_sqlite(slot):
-    with sqlite3.connect(DB_PATH) as connection:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS saves "
-            "(slot TEXT PRIMARY KEY, progress_json TEXT NOT NULL)"
-        )
+            row = conn.execute(
+                "SELECT state FROM saves WHERE save_id = ?",
+                (save_id,)
+            ).fetchone()
 
-        result = connection.execute(
-            "SELECT progress_json FROM saves WHERE slot = ?",
-            (slot,)
-        ).fetchone()
-
-    return json.loads(result[0]) if result else None
-
-
-def load_progress(mode, slot):
-    if mode == "JSON 파일":
-        return load_json(slot)
-
-    if mode == "SQLite 데이터베이스":
-        return load_sqlite(slot)
+        return json.loads(row[0]) if row else None
 
     return None
 
 
-def save_progress(mode, slot, progress):
-    if mode == "JSON 파일":
-        save_json(slot, progress)
+# 현재 게임 상태 자동 저장
+def write_saved(mode, save_id, progress):
+    if mode == "JSON":
+        if JSON_FILE.exists():
+            data = json.loads(
+                JSON_FILE.read_text(encoding="utf-8")
+            )
+        else:
+            data = {}
 
-    elif mode == "SQLite 데이터베이스":
-        save_sqlite(slot, progress)
+        data[save_id] = progress
+
+        JSON_FILE.write_text(
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2
+            ),
+            encoding="utf-8"
+        )
+
+    elif mode == "SQLite":
+        with sqlite3.connect(SQLITE_FILE) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS saves "
+                "(save_id TEXT PRIMARY KEY, state TEXT NOT NULL)"
+            )
+
+            conn.execute(
+                "INSERT OR REPLACE INTO saves "
+                "(save_id, state) VALUES (?, ?)",
+                (
+                    save_id,
+                    json.dumps(progress, ensure_ascii=False)
+                )
+            )
+            conn.commit()
 
 
+# 화면 설정
 st.set_page_config(
-    page_title="추리게임 데이터 저장 실험실",
-    page_icon="🗂️"
+    page_title="추리게임 자동 저장 실험",
+    page_icon="🕵️"
 )
 
-st.title("🗂️ 추리게임 데이터 저장 실험실")
+st.title("🕵️ 추리게임 자동 저장 실험")
 
 st.write(
-    "진행 위치·조사 기록·추리 노트를 저장하고 "
-    "새로고침 후 복원해 보세요."
+    "장소를 이동하거나 단서를 모으면 자동 저장됩니다. "
+    "F5를 눌러 확인해 보세요."
 )
 
-st.caption(
-    "학습용 공개 실험입니다. "
-    "실명·비밀번호·개인정보는 입력하지 마세요."
-)
+
+# 실험 번호를 URL에 저장
+save_id = st.query_params.get("save_id", "")
+
+if not re.fullmatch(r"[a-f0-9]{12}", save_id):
+    save_id = uuid.uuid4().hex[:12]
+    st.query_params["save_id"] = save_id
+
+
+# 저장 방식 선택
+url_mode = st.query_params.get("mode", "SQLite")
+
+if url_mode not in MODES:
+    url_mode = "SQLite"
 
 mode = st.radio(
-    "① 저장 방식",
+    "저장 방식 선택",
     MODES,
+    index=MODES.index(url_mode),
     horizontal=True
 )
 
-slot = st.text_input(
-    "② 실험 슬롯 ID (영문·숫자·-·_만 사용)",
-    value="test01"
+if st.query_params.get("mode") != mode:
+    st.query_params["mode"] = mode
+
+st.caption(
+    "현재 페이지 주소를 저장하면 "
+    "같은 실험 번호로 다시 접속할 수 있습니다."
 )
 
-if not re.fullmatch(r"[a-zA-Z0-9_-]{1,20}", slot):
-    st.error("슬롯 ID를 영문·숫자·-·_로 1~20자 입력하세요.")
-    st.stop()
 
-
-# 저장 방식이나 슬롯을 바꾸면
-# 화면의 임시 진행 상태를 새로 시작합니다.
-active = (mode, slot)
+# 접속 시 저장된 상태 자동 불러오기
+active = (mode, save_id)
 
 if st.session_state.get("active") != active:
     st.session_state.active = active
-    st.session_state.progress = new_progress()
-    st.session_state.memo_version = (
-        st.session_state.get("memo_version", 0) + 1
-    )
 
+    st.session_state.progress = (
+        read_saved(mode, save_id) or empty_progress()
+    )
 
 progress = st.session_state.progress
 
-st.divider()
-st.subheader("③ 모의 추리게임")
+
+# 게임 화면
+st.subheader("현재 진행 상황")
 
 st.write(
-    f"**현재 장소:** {PLACES[progress['place']]} "
-    f"({progress['place'] + 1}/4)"
+    f"**장소:** {PLACES[progress['place']]}"
 )
 
-st.progress((progress["place"] + 1) / 4)
+st.progress(
+    (progress["place"] + 1) / len(PLACES)
+)
 
 
-left, right = st.columns(2)
-
-with left:
-    if st.button(
-        "다음 장소로",
-        disabled=progress["place"] >= 3,
-        use_container_width=True
-    ):
-        progress["place"] += 1
-        st.rerun()
-
-with right:
-    if st.button(
-        "화면 상태 초기화",
-        use_container_width=True
-    ):
-        st.session_state.progress = new_progress()
-        st.session_state.memo_version += 1
-        st.rerun()
-
-
-clue = f"{PLACES[progress['place']]} 단서"
-
+# 장소 이동 시 자동 저장
 if st.button(
-    "현재 장소의 단서 수집",
-    disabled=clue in progress["clues"]
+    "다음 장소로 이동",
+    disabled=progress["place"] == len(PLACES) - 1
 ):
-    progress["clues"].append(clue)
+    progress["place"] += 1
+
+    write_saved(mode, save_id, progress)
     st.rerun()
 
 
-note_key = f"memo_draft_{st.session_state.memo_version}"
+# 단서 수집 시 자동 저장
+clue = f"{PLACES[progress['place']]}에서 발견한 단서"
 
-st.text_input(
-    "추리 노트 입력",
-    value=progress["memo"],
-    key=note_key
-)
+if st.button(
+    "이 장소의 단서 수집",
+    disabled=clue in progress["clues"]
+):
+    progress["clues"].append(clue)
 
-if st.button("추리 노트에 반영"):
-    progress["memo"] = st.session_state[note_key]
-
-    st.success(
-        "현재 화면 상태에 메모를 반영했어요. "
-        "저장 버튼은 별도로 눌러야 해요."
-    )
+    write_saved(mode, save_id, progress)
+    st.rerun()
 
 
 st.write(
@@ -199,77 +195,44 @@ st.write(
     ", ".join(progress["clues"]) or "없음"
 )
 
-st.write(
-    "**추리 노트:**",
-    progress["memo"] or "비어 있음"
+
+# 추리 노트 변경 시 자동 저장
+memo = st.text_area(
+    "추리 노트 (입력 후 다른 곳을 클릭해 확정)",
+    value=progress["memo"],
+    key=f"memo_{mode}_{save_id}"
 )
 
+if memo != progress["memo"]:
+    progress["memo"] = memo
 
+    write_saved(mode, save_id, progress)
+
+
+# 실험 결과 안내
 st.divider()
-st.subheader("④ 저장 및 복원")
 
 if mode == "Session State":
-    st.info(
-        "버튼을 누르는 동안 현재 세션에서 유지됩니다. "
-        "새로고침하면 초기화됩니다."
+    st.warning(
+        "Session State 방식은 새로고침하면 "
+        "진행 상황이 초기화됩니다."
     )
 
 else:
-    st.caption(
-        "현재 장소와 단서, 노트가 모두 저장됩니다. "
-        "저장 후 새로고침하고 다시 불러오세요."
+    st.success(
+        f"{mode} 방식: 진행 상태가 자동 저장됩니다. "
+        "새로고침하면 저장된 상태를 불러옵니다."
     )
 
 
-col_save, col_load = st.columns(2)
-
-with col_save:
-    if st.button(
-        "현재 상태 저장",
-        use_container_width=True
-    ):
-        if mode == "Session State":
-            st.info(
-                "Session State는 지금 세션에 "
-                "이미 저장되어 있어요."
-            )
-
-        else:
-            save_progress(mode, slot, progress)
-            st.success(f"{mode}에 저장했어요.")
-
-
-with col_load:
-    if st.button(
-        "저장 상태 불러오기",
-        use_container_width=True
-    ):
-        if mode == "Session State":
-            st.warning(
-                "Session State는 새 세션에서 "
-                "이전 상태를 불러올 수 없어요."
-            )
-
-        else:
-            saved = load_progress(mode, slot)
-
-            if saved is None:
-                st.warning(
-                    "이 슬롯에 저장된 데이터가 없어요."
-                )
-
-            else:
-                st.session_state.progress = saved
-                st.session_state.memo_version += 1
-                st.rerun()
-
-
-with st.expander("현재 진행 상태의 데이터 구조 확인"):
+# 저장되는 데이터 확인
+with st.expander("실제 저장되는 데이터 보기"):
     st.json(progress)
 
 
 st.caption(
-    "주의: JSON/SQLite는 이 서버의 로컬 파일에 저장됩니다. "
-    "Streamlit Community Cloud에서는 서버 교체·재시작 후 "
-    "파일 보존이 보장되지 않습니다."
+    "실험용 앱입니다. 같은 주소를 아는 사람은 "
+    "저장 데이터를 볼 수 있으므로 개인정보를 입력하지 마세요. "
+    "또한 Streamlit Community Cloud에서는 "
+    "서버 재시작 후 로컬 저장 파일의 보존이 보장되지 않습니다."
 )
